@@ -244,6 +244,7 @@ const getPresignedUrl = async (fileName, token, proxy) => {
     'Referrer-Policy': 'strict-origin-when-cross-origin',
   };
   try {
+
     const response = await axios.get(`${API_BASE_URL}/get_presigned_url?file_name=${fileName}`, {
       headers,
       httpsAgent: proxy ? new HttpsProxyAgent(proxy) : undefined,
@@ -383,8 +384,9 @@ const main = async () => {
     const success = await processInvoice(token, proxy, i, scanCount);
     if (success) successfulScans++;
     if (i < scanCount) {
-      console.log(chalk.white('  ⏱️ Waiting 1 second before next scan...'));
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      console.log(chalk.white('  ⏱️ Waiting 10~30 second before next scan...'));
+      const s = Math.random() * 20 + 10
+      await new Promise(resolve => setTimeout(resolve, s*1000));
     }
   }
 
