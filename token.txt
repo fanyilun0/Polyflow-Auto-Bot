@@ -1,2 +1,1 @@
-BEARER token1
-BEARER token2
+Bearer token1
