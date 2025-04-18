@@ -6,7 +6,7 @@ const chalk = require('chalk');
 const readlineSync = require('readline-sync');
 const fs = require('fs').promises;
 const path = require('path');
-const { scheduleJob } = require('node-schedule');
+const schedule = require('node-schedule');
 
 const API_BASE_URL = 'https://api-v2.polyflow.tech/api/scan2earn';
 
@@ -527,7 +527,7 @@ const runScheduledTask = async (tokens, userAgents, proxies, config, taskIndex) 
 // 每天0点重新生成运行时间
 const scheduleNewDayTasks = async (tokens, userAgents, proxies, config) => {
   // 创建一个在每天0点执行的任务
-  scheduleJob({
+  schedule.scheduleJob({
     name: 'dailyReset',
     rule: '0 0 * * *'
     // 不指定tz参数，将自动使用系统当地时区
@@ -535,7 +535,7 @@ const scheduleNewDayTasks = async (tokens, userAgents, proxies, config) => {
     console.log(chalk.yellow('\n🔄 凌晨0点，为新的一天生成任务计划'));
     
     // 取消所有现有的定时任务（除了0点的这个任务）
-    const scheduledJobs = Object.values(scheduleJob.scheduledJobs);
+    const scheduledJobs = Object.values(schedule.scheduledJobs);
     for (const job of scheduledJobs) {
       if (job.name !== 'dailyReset') {
         job.cancel();
@@ -578,7 +578,7 @@ const setupDailyTasks = (tokens, userAgents, proxies, config) => {
     const [hour, minute] = time.split(':').map(Number);
     const cronTime = `${minute} ${hour} * * *`;
     
-    scheduleJob({
+    schedule.scheduleJob({
       name: `task_${index}`,
       rule: cronTime
       // 不指定tz参数，将自动使用系统当地时区
