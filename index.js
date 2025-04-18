@@ -6,23 +6,68 @@ const chalk = require('chalk');
 const readlineSync = require('readline-sync');
 const fs = require('fs').promises;
 const path = require('path');
+const { scheduleJob } = require('node-schedule');
 
 const API_BASE_URL = 'https://api-v2.polyflow.tech/api/scan2earn';
+
+// 谷歌浏览器UA生成器
+const generateChromeUA = () => {
+  const majorVersion = getRandomInt(90, 123);
+  const minorVersion = getRandomInt(0, 9);
+  const buildVersion = getRandomInt(1000, 9999);
+  const branchVersion = getRandomInt(100, 999);
+  
+  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${majorVersion}.0.${minorVersion}.${buildVersion} Safari/537.36`;
+};
+
+// 保存UA到文件
+const saveUserAgents = async (userAgents) => {
+  try {
+    await fs.writeFile(path.join(__dirname, 'user_agents.json'), JSON.stringify(userAgents, null, 2), 'utf8');
+    console.log(chalk.green('✅ 用户代理已保存到 user_agents.json'));
+  } catch (error) {
+    console.error(chalk.red(`❌ 保存用户代理失败: ${error.message}`));
+  }
+};
+
+// 从文件读取UA
+const readUserAgents = async () => {
+  try {
+    const data = await fs.readFile(path.join(__dirname, 'user_agents.json'), 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.log(chalk.yellow('⚠️ 未找到用户代理文件，将创建新的用户代理'));
+    return {};
+  }
+};
+
+// 确保每个token都有对应的UA
+const ensureUserAgents = async (tokens) => {
+  const userAgents = await readUserAgents();
+  
+  let hasNewUA = false;
+  tokens.forEach((token, index) => {
+    const tokenKey = `token_${index}`;
+    if (!userAgents[tokenKey]) {
+      userAgents[tokenKey] = generateChromeUA();
+      hasNewUA = true;
+      console.log(chalk.green(`✅ 为 Token ${index + 1} 生成新的用户代理`));
+    }
+  });
+  
+  if (hasNewUA) {
+    await saveUserAgents(userAgents);
+  }
+  
+  return userAgents;
+};
 
 const readTokens = async () => {
   try {
     const data = await fs.readFile(path.join(__dirname, 'token.txt'), 'utf8');
     const tokens = data.split('\n').map(line => line.trim()).filter(line => line);
     if (!tokens.length) throw new Error('No tokens found in token.txt');
-    const validTokens = tokens.filter(token => {
-      if (!token.startsWith('Bearer ')) {
-        console.error(chalk.red(`❌ Invalid token format (missing Bearer): ${token.slice(0, 20)}...`));
-        return false;
-      }
-      return true;
-    });
-    if (!validTokens.length) throw new Error('No valid tokens found in token.txt');
-    return validTokens;
+    return tokens;
   } catch (error) {
     console.error(chalk.red(`❌ Error reading token.txt: ${error.message}`));
     process.exit(1);
@@ -224,16 +269,15 @@ const generateInvoice = () => {
   return canvas.toBuffer('image/png');
 };
 
-const getPresignedUrl = async (fileName, token, proxy) => {
+const getPresignedUrl = async (fileName, token, userAgent, proxy) => {
   const headers = {
     'accept': 'application/json, text/plain, */*',
     'accept-language': 'en-US,en;q=0.6',
     'accept-encoding': 'gzip, deflate, br, zstd',
     'origin': 'https://app.polyflow.tech',
-    'authorization': token,
+    'authorization': `Bearer ${token}`,
     'content-type': 'application/json',
-    // 'sec-ch-ua': '"Brave";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+    'user-agent': userAgent,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-dest': 'empty',
@@ -244,7 +288,6 @@ const getPresignedUrl = async (fileName, token, proxy) => {
     'Referrer-Policy': 'strict-origin-when-cross-origin',
   };
   try {
-
     const response = await axios.get(`${API_BASE_URL}/get_presigned_url?file_name=${fileName}`, {
       headers,
       httpsAgent: proxy ? new HttpsProxyAgent(proxy) : undefined,
@@ -288,14 +331,13 @@ const uploadInvoice = async (presignedUrl, fileBuffer, proxy) => {
   }
 };
 
-const saveInvoice = async (invoicePath, token, proxy) => {
+const saveInvoice = async (invoicePath, token, userAgent, proxy) => {
   const headers = {
     'accept': 'application/json, text/plain, */*',
     'accept-language': 'en-US,en;q=0.6',
-    'authorization': token,
+    'authorization': `Bearer ${token}`,
     'content-type': 'application/json',
-    // 'sec-ch-ua': '"Brave";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+    'user-agent': userAgent,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-dest': 'empty',
@@ -319,7 +361,7 @@ const saveInvoice = async (invoicePath, token, proxy) => {
   }
 };
 
-const processInvoice = async (token, proxy, scanIndex, totalScans) => {
+const processInvoice = async (token, userAgent, proxy, scanIndex, totalScans) => {
   console.log(chalk.cyan(`\n🔄 [${scanIndex}/${totalScans}] Starting scan...`));
   try {
     const fileName = generateFileName();
@@ -327,13 +369,13 @@ const processInvoice = async (token, proxy, scanIndex, totalScans) => {
     const invoiceBuffer = generateInvoice();
 
     console.log(chalk.white('  🔑 Fetching presigned URL...'));
-    const { url: presignedUrl, key } = await getPresignedUrl(fileName, token, proxy);
+    const { url: presignedUrl, key } = await getPresignedUrl(fileName, token, userAgent, proxy);
 
     console.log(chalk.white(`  📤 Uploading invoice to S3...`));
     await uploadInvoice(presignedUrl, invoiceBuffer, proxy);
 
     console.log(chalk.white('  💾 Saving invoice metadata...'));
-    await saveInvoice(key, token, proxy);
+    await saveInvoice(key, token, userAgent, proxy);
 
     console.log(chalk.green(`✅ [${scanIndex}/${totalScans}] Scan completed successfully`));
     return true;
@@ -343,7 +385,215 @@ const processInvoice = async (token, proxy, scanIndex, totalScans) => {
   }
 };
 
-const main = async () => {
+// 保存配置到文件
+const saveConfig = async (config) => {
+  try {
+    await fs.writeFile(path.join(__dirname, 'config.json'), JSON.stringify(config, null, 2), 'utf8');
+    console.log(chalk.green('✅ 配置已保存到 config.json'));
+  } catch (error) {
+    console.error(chalk.red(`❌ 保存配置失败: ${error.message}`));
+  }
+};
+
+// 生成随机的执行时间点（只在白天）
+const generateRandomRunTimes = (count) => {
+  const runTimes = [];
+  // 定义白天时间范围（8:00-22:00）
+  const startHour = 8;
+  const endHour = 22;
+  const workingHours = endHour - startHour;
+  
+  // 获取当地时区偏移（分钟）
+  const now = new Date();
+  const timezoneOffset = now.getTimezoneOffset();
+  console.log(chalk.white(`  🌐 当前时区偏移: ${timezoneOffset} 分钟`));
+  
+  // 根据时区调整工作时间范围
+  const localStartHour = Math.max(8, startHour - Math.floor(timezoneOffset / 60));
+  const localEndHour = Math.min(22, endHour - Math.floor(timezoneOffset / 60));
+  const localWorkingHours = localEndHour - localStartHour;
+  
+  console.log(chalk.white(`  🕒 本地工作时间范围: ${localStartHour}:00 - ${localEndHour}:00`));
+  
+  // 避免时间点过于接近
+  const minHoursBetweenRuns = localWorkingHours / (count + 1);
+  
+  // 生成均匀分布的随机时间点
+  for (let i = 0; i < count; i++) {
+    // 为每个时间点分配一个时间段，然后在段内随机选择
+    const segmentStart = localStartHour + minHoursBetweenRuns * i;
+    const segmentEnd = localStartHour + minHoursBetweenRuns * (i + 1);
+    
+    // 在分配的时间段内随机选择一个小时
+    const randomHour = Math.floor(segmentStart + Math.random() * (segmentEnd - segmentStart));
+    // 随机分钟
+    const randomMinute = Math.floor(Math.random() * 60);
+    
+    // 格式化为 "HH:MM" 
+    const timeString = `${String(randomHour).padStart(2, '0')}:${String(randomMinute).padStart(2, '0')}`;
+    runTimes.push(timeString);
+  }
+  
+  // 按时间排序
+  return runTimes.sort((a, b) => {
+    const [aHour, aMin] = a.split(':').map(Number);
+    const [bHour, bMin] = b.split(':').map(Number);
+    return (aHour * 60 + aMin) - (bHour * 60 + bMin);
+  });
+};
+
+// 从文件读取配置
+const readConfig = async () => {
+  try {
+    const data = await fs.readFile(path.join(__dirname, 'config.json'), 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.log(chalk.yellow('⚠️ 未找到配置文件，将使用默认配置'));
+    return {
+      minDailyScans: 4,      // 每天最少扫描次数
+      maxDailyScans: 6,      // 每天最多扫描次数
+      minScansPerRun: 3,     // 每次运行最少扫描次数
+      maxScansPerRun: 8,     // 每次运行最多扫描次数
+      minDelay: 60,          // 扫描之间最小延迟(秒)
+      maxDelay: 300,         // 扫描之间最大延迟(秒)
+      runTimes: []           // 运行时间将自动生成
+    };
+  }
+};
+
+// 获取今天的随机扫描参数
+const getRandomScanParams = (config) => {
+  // 随机生成今日扫描次数
+  const dailyScans = getRandomInt(config.minDailyScans, config.maxDailyScans);
+  
+  // 生成每次运行的随机扫描次数数组
+  const scansPerRunArray = [];
+  for (let i = 0; i < dailyScans; i++) {
+    scansPerRunArray.push(getRandomInt(config.minScansPerRun, config.maxScansPerRun));
+  }
+  
+  return {
+    dailyScans,
+    scansPerRunArray
+  };
+};
+
+// 执行定时任务
+const runScheduledTask = async (tokens, userAgents, proxies, config, taskIndex) => {
+  // 获取当前任务应该执行的扫描次数
+  const scansPerRun = config.scansPerRunArray[taskIndex];
+  const { minDelay, maxDelay } = config;
+  
+  console.log(chalk.yellow('\n🕒 执行定时任务'));
+  console.log(chalk.white('--------------------------------------------------------'));
+  console.log(chalk.green(`✅ 将执行 ${scansPerRun} 次扫描`));
+  
+  let successfulScans = 0;
+  const startTime = Date.now();
+  
+  for (let i = 1; i <= scansPerRun; i++) {
+    const tokenIndex = (i - 1) % tokens.length;
+    const token = tokens[tokenIndex];
+    const userAgent = userAgents[`token_${tokenIndex}`];
+    const proxy = getRandomProxy(proxies);
+    
+    console.log(chalk.white(`  🔑 使用 Token ${tokenIndex + 1}: ${token.slice(0, 20)}...`));
+    console.log(chalk.white(`  🌐 使用用户代理: ${userAgent.slice(0, 30)}...`));
+    if (proxy) console.log(chalk.white(`  🌐 使用代理: ${proxy}`));
+    
+    const success = await processInvoice(token, userAgent, proxy, i, scansPerRun);
+    if (success) successfulScans++;
+    
+    if (i < scansPerRun) {
+      const delay = getRandomInt(minDelay, maxDelay);
+      console.log(chalk.white(`  ⏱️ 等待 ${delay} 秒后进行下一次扫描...`));
+      await new Promise(resolve => setTimeout(resolve, delay * 1000));
+    }
+  }
+
+  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+  console.log(chalk.yellow('\n🏁 扫描摘要'));
+  console.log(chalk.white('--------------------------------------------------------'));
+  console.log(chalk.green(`✅ 成功完成 ${successfulScans}/${scansPerRun} 次扫描`));
+  console.log(chalk.white(`⏱️ 总时间: ${duration} 秒\n`));
+  
+  if (successfulScans < scansPerRun) {
+    console.log(chalk.yellow('⚠️ 部分扫描失败。请检查token有效性或API状态。'));
+  }
+  
+  console.log(chalk.green('✅ 定时任务完成，等待下一次执行'));
+};
+
+// 每天0点重新生成运行时间
+const scheduleNewDayTasks = async (tokens, userAgents, proxies, config) => {
+  // 创建一个在每天0点执行的任务
+  scheduleJob({
+    name: 'dailyReset',
+    rule: '0 0 * * *'
+    // 不指定tz参数，将自动使用系统当地时区
+  }, async () => {
+    console.log(chalk.yellow('\n🔄 凌晨0点，为新的一天生成任务计划'));
+    
+    // 取消所有现有的定时任务（除了0点的这个任务）
+    const scheduledJobs = Object.values(scheduleJob.scheduledJobs);
+    for (const job of scheduledJobs) {
+      if (job.name !== 'dailyReset') {
+        job.cancel();
+      }
+    }
+    
+    // 生成新的随机参数
+    const { dailyScans, scansPerRunArray } = getRandomScanParams(config);
+    config.dailyScans = dailyScans;
+    config.scansPerRunArray = scansPerRunArray;
+    
+    // 生成新的随机运行时间
+    config.runTimes = generateRandomRunTimes(dailyScans);
+    
+    console.log(chalk.green(`✅ 已为今天生成随机执行参数:`));
+    console.log(chalk.white(`   - 今日执行次数: ${dailyScans} 次`));
+    console.log(chalk.white(`   - 每次扫描次数: ${scansPerRunArray.join(', ')} 次`));
+    console.log(chalk.white(`   - 执行时间: ${config.runTimes.join(', ')}`));
+    
+    await saveConfig(config);
+    
+    // 重新设置所有任务
+    setupDailyTasks(tokens, userAgents, proxies, config);
+  });
+  
+  // 输出当前系统时区信息
+  const now = new Date();
+  const timezoneOffset = now.getTimezoneOffset();
+  const timezoneHours = Math.abs(Math.floor(timezoneOffset / 60));
+  const timezoneMinutes = Math.abs(timezoneOffset % 60);
+  const timezoneSign = timezoneOffset > 0 ? '-' : '+';
+  
+  console.log(chalk.white(`  🌐 使用系统当地时区: GMT${timezoneSign}${String(timezoneHours).padStart(2, '0')}:${String(timezoneMinutes).padStart(2, '0')}`));
+};
+
+// 设置每日定时任务
+const setupDailyTasks = (tokens, userAgents, proxies, config) => {
+  // 设置所有的计划任务
+  config.runTimes.forEach((time, index) => {
+    const [hour, minute] = time.split(':').map(Number);
+    const cronTime = `${minute} ${hour} * * *`;
+    
+    scheduleJob({
+      name: `task_${index}`,
+      rule: cronTime
+      // 不指定tz参数，将自动使用系统当地时区
+    }, async () => {
+      const currentTime = new Date().toLocaleTimeString();
+      console.log(chalk.yellow(`\n🕒 [${currentTime}] 执行计划任务 #${index + 1}`));
+      await runScheduledTask(tokens, userAgents, proxies, config, index);
+    });
+    
+    console.log(chalk.green(`✅ 已设置定时任务 #${index + 1}: 每天 ${time} (cron: ${cronTime}) - 将扫描 ${config.scansPerRunArray[index]} 次`));
+  });
+};
+
+// 配置初始化和定时任务设置
+const setupScheduledTasks = async () => {
   console.clear();
   
   console.log(chalk.white('--------------------------------------------------------'));
@@ -351,57 +601,110 @@ const main = async () => {
   console.log(chalk.white('--------------------------------------------------------'));
 
   const tokens = await readTokens();
-  console.log(chalk.green(`\n✅ Loaded ${tokens.length} tokens`));
+  console.log(chalk.green(`\n✅ 已加载 ${tokens.length} 个token`));
   tokens.forEach((token, i) => {
     console.log(chalk.white(`  🔑 Token ${i + 1}: ${token.slice(0, 20)}...`));
   });
 
+  const userAgents = await ensureUserAgents(tokens);
+  console.log(chalk.green(`✅ 已为所有token配置用户代理`));
+
   const proxies = await readProxies();
   if (proxies) {
-    console.log(chalk.green(`✅ Loaded ${proxies.length} proxies`));
+    console.log(chalk.green(`✅ 已加载 ${proxies.length} 个代理`));
   } else {
-    console.log(chalk.yellow(`⚠️ No proxies loaded, running without proxy`));
+    console.log(chalk.yellow(`⚠️ 未加载代理，将不使用代理运行`));
   }
 
-  console.log(chalk.yellow('\n⚙️ CONFIGURATION'));
-  console.log(chalk.white('--------------------------------------------------------'));
-  const scanCount = readlineSync.questionInt(chalk.white('📊 Enter the number of scans to perform: '), {
-    min: 1,
-  });
-  console.log(chalk.green(`✅ Will perform ${scanCount} scan(s)`));
-
-  console.log(chalk.yellow('\n🔄 PROCESSING SCANS'));
-  console.log(chalk.white('--------------------------------------------------------'));
+  let config = await readConfig();
   
-  let successfulScans = 0;
-  const startTime = Date.now();
+  // 询问是否要更改配置
+  const changeConfig = readlineSync.keyInYNStrict(chalk.white('是否要更改当前配置？'));
   
-  for (let i = 1; i <= scanCount; i++) {
-    const token = tokens[(i - 1) % tokens.length];
-    const proxy = getRandomProxy(proxies);
-    console.log(chalk.white(`  🔑 Using token: ${token.slice(0, 20)}...`));
-    if (proxy) console.log(chalk.white(`  🌐 Using proxy: ${proxy}`));
-    const success = await processInvoice(token, proxy, i, scanCount);
-    if (success) successfulScans++;
-    if (i < scanCount) {
-      console.log(chalk.white('  ⏱️ Waiting 10~30 second before next scan...'));
-      const s = Math.random() * 20 + 10
-      await new Promise(resolve => setTimeout(resolve, s*1000));
-    }
+  if (changeConfig) {
+    console.log(chalk.yellow('\n⚙️ 配置'));
+    console.log(chalk.white('--------------------------------------------------------'));
+    
+    config.minDailyScans = readlineSync.questionInt(chalk.white(`每天最少执行多少次？(当前: ${config.minDailyScans}): `), {
+      defaultInput: config.minDailyScans,
+      min: 1
+    });
+    
+    config.maxDailyScans = readlineSync.questionInt(chalk.white(`每天最多执行多少次？(当前: ${config.maxDailyScans}): `), {
+      defaultInput: config.maxDailyScans,
+      min: config.minDailyScans
+    });
+    
+    config.minScansPerRun = readlineSync.questionInt(chalk.white(`每次运行最少执行多少次扫描？(当前: ${config.minScansPerRun}): `), {
+      defaultInput: config.minScansPerRun,
+      min: 1
+    });
+    
+    config.maxScansPerRun = readlineSync.questionInt(chalk.white(`每次运行最多执行多少次扫描？(当前: ${config.maxScansPerRun}): `), {
+      defaultInput: config.maxScansPerRun,
+      min: config.minScansPerRun
+    });
+    
+    config.minDelay = readlineSync.questionInt(chalk.white(`扫描之间的最小延迟(秒)？(当前: ${config.minDelay}): `), {
+      defaultInput: config.minDelay,
+      min: 1
+    });
+    
+    config.maxDelay = readlineSync.questionInt(chalk.white(`扫描之间的最大延迟(秒)？(当前: ${config.maxDelay}): `), {
+      defaultInput: config.maxDelay,
+      min: config.minDelay
+    });
+    
+    await saveConfig(config);
   }
-
-  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  console.log(chalk.yellow('\n🏁 SCAN SUMMARY'));
-  console.log(chalk.white('--------------------------------------------------------'));
-  console.log(chalk.green(`✅ Completed ${successfulScans}/${scanCount} scans successfully`));
-  console.log(chalk.white(`⏱️ Total time: ${duration} seconds\n`));
   
-  if (successfulScans < scanCount) {
-    console.log(chalk.yellow('⚠️ Some scans failed. Check token validity or API status.'));
+  // 生成今天的随机扫描参数
+  const { dailyScans, scansPerRunArray } = getRandomScanParams(config);
+  config.dailyScans = dailyScans;
+  config.scansPerRunArray = scansPerRunArray;
+  
+  // 生成随机运行时间
+  config.runTimes = generateRandomRunTimes(dailyScans);
+  
+  console.log(chalk.green(`\n✅ 已为今天生成随机执行参数:`));
+  console.log(chalk.white(`   - 今日执行次数: ${dailyScans} 次`));
+  console.log(chalk.white(`   - 每次扫描次数: ${scansPerRunArray.join(', ')} 次`));
+  console.log(chalk.white(`   - 执行时间: ${config.runTimes.join(', ')}`));
+  
+  await saveConfig(config);
+  
+  console.log(chalk.yellow('\n⚙️ 当前配置'));
+  console.log(chalk.white('--------------------------------------------------------'));
+  console.log(chalk.white(`  扫描范围: 每天 ${config.minDailyScans}-${config.maxDailyScans} 次`));
+  console.log(chalk.white(`  扫描次数: 每次运行 ${config.minScansPerRun}-${config.maxScansPerRun} 次`));
+  console.log(chalk.white(`  扫描延迟: ${config.minDelay}-${config.maxDelay} 秒`));
+  
+  // 设置定时任务
+  console.log(chalk.yellow('\n🕒 设置定时任务'));
+  console.log(chalk.white('--------------------------------------------------------'));
+  
+  // 设置每日定时任务
+  setupDailyTasks(tokens, userAgents, proxies, config);
+  
+  // 设置每天0点重新生成任务的计划
+  await scheduleNewDayTasks(tokens, userAgents, proxies, config);
+  console.log(chalk.green(`✅ 已设置每日零点任务重置计划`));
+  
+  // 立即执行一次
+  const runNow = readlineSync.keyInYNStrict(chalk.white('是否要立即执行一次扫描？'));
+  if (runNow) {
+    // 选择随机的一个任务配置来执行
+    const randomTaskIndex = Math.floor(Math.random() * config.scansPerRunArray.length);
+    await runScheduledTask(tokens, userAgents, proxies, config, randomTaskIndex);
   }
+  
+  console.log(chalk.green('\n✅ 所有定时任务已设置'));
+  console.log(chalk.white('脚本将继续运行并按计划执行任务'));
+  console.log(chalk.white('请保持此窗口打开，或考虑使用PM2等工具在后台运行'));
 };
 
-main().catch(error => {
-  console.error(chalk.red(`❌ FATAL ERROR: ${error.message}`));
+// 启动应用
+setupScheduledTasks().catch(error => {
+  console.error(chalk.red(`❌ 致命错误: ${error.message}`));
   process.exit(1);
 });
